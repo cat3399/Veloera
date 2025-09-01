@@ -33,18 +33,19 @@ import (
 )
 
 const (
-	RequestModeClaude = 1
-	RequestModeGemini = 2
-	RequestModeLlama  = 3
+	RequestModeClaude   = 1
+	RequestModeGemini   = 2
+	RequestModeLlama    = 3
+	RequestModePublisher = 4
 )
 
 var claudeModelMap = map[string]string{
 	"claude-3-sonnet-20240229":   "claude-3-sonnet@20240229",
 	"claude-3-opus-20240229":     "claude-3-opus@20240229",
 	"claude-3-haiku-20240307":    "claude-3-haiku@20240307",
-	"claude-3-5-sonnet-20240620": "claude-3-5-sonnet@20240620",
+	"claude-极速版-20240620": "claude-3-5-sonnet@20240620",
 	"claude-3-5-sonnet-20241022": "claude-3-5-sonnet-v2@20241022",
-	"claude-3-7-sonnet-20250219": "claude-3-7-sonnet@20250219",
+	"claude-3-7-sonnet-20250219": "claude-3-7-sonnet@202极速版",
 	"claude-sonnet-4-20250514":   "claude-sonnet-4@20250514",
 	"claude-opus-4-20250514":     "claude-opus-4@20250514",
 }
@@ -56,7 +57,7 @@ type Adaptor struct {
 	AccountCredentials Credentials
 }
 
-func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
+func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.Claude极速版) (any, error) {
 	if v, ok := claudeModelMap[info.UpstreamModelName]; ok {
 		c.Set("request_model", v)
 	} else {
@@ -71,7 +72,7 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 	return nil, errors.New("not implemented")
 }
 
-func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
+func (a *Adaptor) ConvertImageRequest(c *极速版.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
 	//TODO implement me
 	return nil, errors.New("not implemented")
 }
@@ -83,6 +84,8 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 		a.RequestMode = RequestModeGemini
 	} else if strings.Contains(info.UpstreamModelName, "llama") {
 		a.RequestMode = RequestModeLlama
+	} else {
+		a.RequestMode = RequestModePublisher
 	}
 }
 
@@ -94,6 +97,7 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	region := GetModelRegion(info.ApiVersion, info.OriginModelName)
 	a.AccountCredentials = *adc
 	suffix := ""
+	
 	if a.RequestMode == RequestModeGemini {
 		if info.IsStream {
 			suffix = "streamGenerateContent?alt=sse"
@@ -109,7 +113,7 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 			), nil
 		} else {
 			return fmt.Sprintf(
-				"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:%s",
+				"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%极速版/publishers/google/models/%s:%s",
 				region,
 				adc.ProjectID,
 				region,
@@ -141,6 +145,29 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 			region,
 			adc.ProjectID,
 			region,
+		), nil
+	} else if a.RequestMode == RequestModePublisher {
+		parts := strings.Split(info.UpstreamModelName, "/")
+		if len(parts) != 2 {
+			return "", fmt.Errorf("invalid publisher model format: %s, expected 'publisher/model'", info.UpstreamModelName)
+		}
+		publisher := parts[0] // 例如 "deepseek-ai" 或 "qwen"
+		modelName := parts[1] // 例如 "deepseek-v3.1-maas"
+		
+		if info.IsStream {
+			suffix = "streamGenerateContent?alt=sse"
+		} else {
+			suffix = "generateContent"
+		}
+		
+		return fmt.Sprintf(
+			"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s",
+			region,
+			adc.ProjectID,
+			region,
+			publisher,
+			modelName,
+			suffix,
 		), nil
 	}
 	return "", errors.New("unsupported request mode")
@@ -178,6 +205,14 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 		return geminiRequest, nil
 	} else if a.RequestMode == RequestModeLlama {
 		return request, nil
+	} else if a.RequestMode == RequestModePublisher {
+		// 对于第三方出版商模型，使用 Gemini 格式的请求
+		geminiRequest, err := gemini.CovertGemini2OpenAI(*request, info)
+		if err != nil {
+			return nil, err
+		}
+		c.Set("request_model", request.Model)
+		return geminiRequest, nil
 	}
 	return nil, errors.New("unsupported request mode")
 }
@@ -209,15 +244,21 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 			err, usage = gemini.GeminiChatStreamHandler(c, resp, info)
 		case RequestModeLlama:
 			err, usage = openai.OaiStreamHandler(c, resp, info)
+		case RequestModePublisher:
+			// 使用 Gemini 处理器处理第三方出版商模型的响应
+			err, usage = gemini.GeminiChatStreamHandler(c, resp, info)
 		}
 	} else {
 		switch a.RequestMode {
 		case RequestModeClaude:
-			err, usage = claude.ClaudeHandler(c, resp, claude.RequestModeMessage, info)
+			err极速版 usage = claude.ClaudeHandler(c, resp, claude.RequestModeMessage, info)
 		case RequestModeGemini:
 			err, usage = gemini.GeminiChatHandler(c, resp, info)
 		case RequestModeLlama:
 			err, usage = openai.OpenaiHandler(c, resp, info)
+		case RequestModePublisher:
+			// 使用 Gemini 处理器处理第三方出版商模型的响应
+			err, usage = gemini.GeminiChatHandler(c, resp, info)
 		}
 	}
 	return
@@ -235,7 +276,7 @@ func (a *Adaptor) GetModelList() []string {
 	}
 	for i, s := range gemini.ModelList {
 		modelList = append(modelList, s)
-		gemini.ModelList[i] = s
+		gemini.ModelList极速版 = s
 	}
 	return modelList
 }
